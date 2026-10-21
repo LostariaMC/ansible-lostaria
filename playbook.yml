@@ -1,0 +1,66 @@
+- name: Gestion des utilisateurs
+  hosts: servers
+  become: true
+  vars_files:
+    - data/users.yml
+  vars:
+    managed_group: lostaria
+    root_users: "{{ users | selectattr('root', 'defined') | selectattr('root') | list }}"
+
+  tasks:
+    - name: Vérifier qu'au moins un utilisateur est root
+      ansible.builtin.assert:
+        that: root_users | length > 0
+        fail_msg: "Aucun utilisateur avec root: true dans users.yml"
+
+    - name: Créer le groupe des utilisateurs gérés
+      ansible.builtin.group:
+        name: "{{ managed_group }}"
+
+    - name: Créer les utilisateurs
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        shell: /bin/bash
+        groups: "{{ managed_group }}"
+        append: true
+      loop: "{{ users }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Donner sudo aux utilisateurs sudo
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/{{ managed_group }}
+        content: |
+          # Géré par Ansible (ansible-lostaria)
+          {% for user in users | selectattr('sudo', 'defined') | selectattr('sudo') %}
+          {{ user.name }} ALL=(ALL) NOPASSWD:ALL
+          {% endfor %}
+        mode: "0440"
+        validate: visudo -cf %s
+
+    - name: Déployer les clés SSH
+      ansible.posix.authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ [item.ssh_keys] | flatten | join('\n') }}"
+        exclusive: true
+      loop: "{{ users }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Déployer les clés SSH des utilisateurs root
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ root_users | map(attribute='ssh_keys') | flatten | join('\n') }}"
+        exclusive: true
+
+    - name: Lister les utilisateurs gérés présents sur le serveur
+      ansible.builtin.getent:
+        database: group
+        key: "{{ managed_group }}"
+
+    - name: Supprimer les utilisateurs qui ne sont plus dans users.yml
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: absent
+        remove: true
+      loop: "{{ ansible_facts.getent_group[managed_group][2].split(',') | select | difference(users | map(attribute='name')) }}"
